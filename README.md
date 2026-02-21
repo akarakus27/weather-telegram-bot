@@ -7,6 +7,7 @@ Her gün saat 20:00’da (Türkiye saati, UTC+3) otomatik olarak Telegram’a ha
 - **Dünün havası**: Min/max sıcaklık, yağış
 - **Yarının tahmini**: Min/max sıcaklık, hava açıklaması
 - **Uyarılar**: Yağmur (☔), soğuk (<5°C ❄), sıcak (>30°C 🔥)
+- OpenWeather yanıt vermezse Open-Meteo ve OpenWeather 5-day ile çoklu yedek veri
 - GitHub Actions ile zamanlanmış çalıştırma (günlük 20:00 TR)
 - Manuel tetikleme desteği
 
