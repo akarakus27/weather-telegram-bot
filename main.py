@@ -280,6 +280,41 @@ def fetch_open_meteo_tomorrow(lat: float, lon: float) -> dict | None:
         return None
 
 
+def fetch_open_meteo_today(lat: float, lon: float) -> dict | None:
+    """Fallback: fetch today's forecast from Open-Meteo forecast API."""
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "daily": "temperature_2m_min,temperature_2m_max,weather_code,precipitation_sum",
+        "forecast_days": 1,
+        "timezone": "Europe/Istanbul",
+    }
+    try:
+        r = requests.get(OPEN_METEO_FORECAST_URL, params=params, timeout=15)
+        r.raise_for_status()
+        payload = r.json()
+        daily = payload.get("daily", {})
+        if not isinstance(daily, dict):
+            return None
+        tmin = _safe_get_daily_value(daily, "temperature_2m_min", 0)
+        tmax = _safe_get_daily_value(daily, "temperature_2m_max", 0)
+        code = _safe_get_daily_value(daily, "weather_code", 0)
+        if code is None:
+            code = _safe_get_daily_value(daily, "weathercode", 0)
+        precip = _safe_get_daily_value(daily, "precipitation_sum", 0) or 0
+        if tmin is None and tmax is None:
+            return None
+        return {
+            "temp": {"min": tmin, "max": tmax},
+            "weather": [{"description": _map_open_meteo_code(code), "id": 500 if precip > 0 else 800}],
+            "rain": {"1h": precip} if precip > 0 else {},
+            "source": "open-meteo-forecast-today",
+        }
+    except (requests.RequestException, ValueError, IndexError) as e:
+        log(f"open-meteo today forecast error: {e}")
+        return None
+
+
 def fetch_openweather_tomorrow_5day(lat: float, lon: float, api_key: str) -> dict | None:
     """Second fallback: use free OpenWeather 5-day/3-hour endpoint for tomorrow."""
     params = {
@@ -511,6 +546,9 @@ def build_message(api_key: str, yesterday: str) -> str:
             lines.append("Dün: Veri alınamadı")
 
         today_data, tom_data = fetch_today_tomorrow_forecast(lat, lon, api_key)
+        if not today_data:
+            log(f"Falling back to Open-Meteo forecast for today ({name})")
+            today_data = fetch_open_meteo_today(lat, lon)
         if today_data:
             lines.append(format_daily_line("Bugün", today_data))
         else:
