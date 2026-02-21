@@ -1,0 +1,216 @@
+"""
+Telegram Weather Bot - Daily weather report for Gebze and Istanbul.
+Sends yesterday's summary and tomorrow's forecast at 20:00 Turkey time.
+"""
+
+import os
+import sys
+from datetime import datetime, timedelta
+
+import requests
+from telegram import Bot
+
+# OpenWeather One Call API 3.0 base URLs
+ONECALL_URL = "https://api.openweathermap.org/data/3.0/onecall"
+DAY_SUMMARY_URL = "https://api.openweathermap.org/data/3.0/onecall/day_summary"
+
+# Cities: (name, lat, lon)
+CITIES = [
+    ("Gebze", 40.8028, 29.4307),
+    ("İstanbul", 41.0082, 28.9784),
+]
+
+# Turkey timezone offset (UTC+3)
+TZ_TURKEY = "+03:00"
+
+
+def log(msg: str) -> None:
+    print(msg, flush=True)
+
+
+def get_yesterday_date_turkey() -> str:
+    """Return yesterday's date in YYYY-MM-DD (Turkey time)."""
+    # Use UTC+3 for Turkey
+    now = datetime.utcnow() + timedelta(hours=3)
+    yesterday = now - timedelta(days=1)
+    return yesterday.strftime("%Y-%m-%d")
+
+
+def fetch_yesterday_weather(lat: float, lon: float, api_key: str, date: str) -> dict | None:
+    """Fetch yesterday's weather via day_summary endpoint."""
+    try:
+        url = (
+            f"{DAY_SUMMARY_URL}?lat={lat}&lon={lon}&date={date}"
+            f"&units=metric&lang=tr&tz={TZ_TURKEY}&appid={api_key}"
+        )
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        return r.json()
+    except requests.RequestException as e:
+        log(f"day_summary API error: {e}")
+        return None
+    except ValueError as e:
+        log(f"day_summary parse error: {e}")
+        return None
+
+
+def fetch_tomorrow_forecast(lat: float, lon: float, api_key: str) -> dict | None:
+    """Fetch forecast via onecall, return daily[1] (tomorrow)."""
+    try:
+        url = (
+            f"{ONECALL_URL}?lat={lat}&lon={lon}"
+            f"&exclude=minutely,hourly&units=metric&lang=tr&appid={api_key}"
+        )
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        daily = data.get("daily", [])
+        if len(daily) < 2:
+            log("onecall: insufficient daily forecast")
+            return None
+        return daily[1]
+    except requests.RequestException as e:
+        log(f"onecall API error: {e}")
+        return None
+    except (ValueError, KeyError) as e:
+        log(f"onecall parse error: {e}")
+        return None
+
+
+def has_rain(data: dict, is_day_summary: bool) -> bool:
+    if is_day_summary:
+        prec = data.get("precipitation", {})
+        total = prec.get("total", 0) if isinstance(prec, dict) else 0
+        return float(total or 0) > 0
+    # hourly-style: rain.1h or weather main/id
+    if "rain" in data and data["rain"]:
+        return True
+    weather = data.get("weather", [{}])
+    if weather:
+        main = weather[0].get("main", "").lower()
+        wid = weather[0].get("id", 0)
+        if main in ("rain", "drizzle") or 500 <= wid < 600:
+            return True
+    return False
+
+
+def format_yesterday(data: dict, city: str) -> str:
+    """Format yesterday's weather from day_summary response."""
+    temp = data.get("temperature", {})
+    if not isinstance(temp, dict):
+        temp = {}
+    tmin = temp.get("min")
+    tmax = temp.get("max")
+    if tmin is None and tmax is None:
+        return f"  📅 Dün: Veri alınamadı"
+
+    tmin = round(float(tmin)) if tmin is not None else "?"
+    tmax = round(float(tmax)) if tmax is not None else "?"
+    desc = "Yağışlı" if has_rain(data, True) else "Günlük veriler"
+
+    parts = [f"  📅 Dün: {tmin}°C - {tmax}°C, {desc}"]
+    if has_rain(data, True):
+        parts.append(" ☔")
+    if isinstance(tmin, (int, float)) and tmin < 5:
+        parts.append(" ❄")
+    if isinstance(tmax, (int, float)) and tmax > 30:
+        parts.append(" 🔥")
+    return "".join(parts)
+
+
+def format_tomorrow(data: dict, city: str) -> str:
+    """Format tomorrow's forecast from onecall daily[1]."""
+    temp = data.get("temp", {})
+    if not isinstance(temp, dict):
+        temp = {}
+    tmin = temp.get("min")
+    tmax = temp.get("max")
+    weather = data.get("weather", [{}])
+    desc = weather[0].get("description", "—") if weather else "—"
+
+    if tmin is None and tmax is None:
+        return f"  📆 Yarın: Veri alınamadı"
+
+    tmin = round(float(tmin)) if tmin is not None else "?"
+    tmax = round(float(tmax)) if tmax is not None else "?"
+    line = f"  📆 Yarın: {tmin}°C - {tmax}°C, {desc}"
+
+    warnings = []
+    if has_rain(data, False):
+        warnings.append(" ☔")
+    if isinstance(tmin, (int, float)) and tmin < 5:
+        warnings.append(" ❄")
+    if isinstance(tmax, (int, float)) and tmax > 30:
+        warnings.append(" 🔥")
+    return line + "".join(warnings)
+
+
+def build_message(api_key: str, yesterday: str) -> str:
+    """Build the full Telegram message for all cities."""
+    lines = [
+        "🌤️ *Hava Durumu Özeti*",
+        f"_Tarih: {yesterday} (dün) / yarın_",
+        "",
+    ]
+
+    for name, lat, lon in CITIES:
+        lines.append(f"*{name}*")
+        yes_data = fetch_yesterday_weather(lat, lon, api_key, yesterday)
+        if yes_data:
+            lines.append(format_yesterday(yes_data, name))
+        else:
+            lines.append("  📅 Dün: Veri alınamadı")
+
+        tom_data = fetch_tomorrow_forecast(lat, lon, api_key)
+        if tom_data:
+            lines.append(format_tomorrow(tom_data, name))
+        else:
+            lines.append("  📆 Yarın: Veri alınamadı")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def send_telegram(token: str, chat_id: str, text: str) -> bool:
+    """Send message via Telegram Bot API."""
+    try:
+        bot = Bot(token=token)
+        bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode="Markdown",
+        )
+        log("Telegram message sent successfully")
+        return True
+    except Exception as e:
+        log(f"Telegram send error: {e}")
+        return False
+
+
+def main() -> None:
+    log("Weather bot starting")
+
+    api_key = os.environ.get("WEATHER_API_KEY")
+    token = os.environ.get("BOT_TOKEN")
+    chat_id = os.environ.get("CHAT_ID")
+
+    if not all((api_key, token, chat_id)):
+        log("Missing env: WEATHER_API_KEY, BOT_TOKEN, CHAT_ID")
+        sys.exit(1)
+
+    yesterday = get_yesterday_date_turkey()
+    log(f"Fetching weather for yesterday={yesterday} and tomorrow")
+
+    msg = build_message(api_key, yesterday)
+    if not msg:
+        log("Message empty, aborting")
+        sys.exit(1)
+
+    if not send_telegram(token, chat_id, msg):
+        sys.exit(1)
+
+    log("Weather bot finished successfully")
+
+
+if __name__ == "__main__":
+    main()
