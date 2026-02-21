@@ -38,14 +38,23 @@ def get_yesterday_date_turkey() -> str:
 
 def fetch_yesterday_weather(lat: float, lon: float, api_key: str, date: str) -> dict | None:
     """Fetch yesterday's weather via day_summary endpoint."""
+    params = {
+        "lat": lat,
+        "lon": lon,
+        "date": date,
+        "units": "metric",
+        "lang": "tr",
+        "tz": TZ_TURKEY,
+        "appid": api_key,
+    }
     try:
-        url = (
-            f"{DAY_SUMMARY_URL}?lat={lat}&lon={lon}&date={date}"
-            f"&units=metric&lang=tr&tz={TZ_TURKEY}&appid={api_key}"
-        )
-        r = requests.get(url, timeout=15)
+        r = requests.get(DAY_SUMMARY_URL, params=params, timeout=15)
         r.raise_for_status()
         return r.json()
+    except requests.HTTPError as e:
+        body = (e.response.text or "")[:300] if e.response is not None else ""
+        log(f"day_summary HTTP error: {e}; response={body}")
+        return None
     except requests.RequestException as e:
         log(f"day_summary API error: {e}")
         return None
@@ -56,12 +65,16 @@ def fetch_yesterday_weather(lat: float, lon: float, api_key: str, date: str) -> 
 
 def fetch_tomorrow_forecast(lat: float, lon: float, api_key: str) -> dict | None:
     """Fetch forecast via onecall, return daily[1] (tomorrow)."""
+    params = {
+        "lat": lat,
+        "lon": lon,
+        "exclude": "minutely,hourly",
+        "units": "metric",
+        "lang": "tr",
+        "appid": api_key,
+    }
     try:
-        url = (
-            f"{ONECALL_URL}?lat={lat}&lon={lon}"
-            f"&exclude=minutely,hourly&units=metric&lang=tr&appid={api_key}"
-        )
-        r = requests.get(url, timeout=15)
+        r = requests.get(ONECALL_URL, params=params, timeout=15)
         r.raise_for_status()
         data = r.json()
         daily = data.get("daily", [])
@@ -69,6 +82,10 @@ def fetch_tomorrow_forecast(lat: float, lon: float, api_key: str) -> dict | None
             log("onecall: insufficient daily forecast")
             return None
         return daily[1]
+    except requests.HTTPError as e:
+        body = (e.response.text or "")[:300] if e.response is not None else ""
+        log(f"onecall HTTP error: {e}; response={body}")
+        return None
     except requests.RequestException as e:
         log(f"onecall API error: {e}")
         return None
