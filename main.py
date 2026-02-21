@@ -13,6 +13,8 @@ from telegram import Bot
 # OpenWeather One Call API 3.0 base URLs
 ONECALL_URL = "https://api.openweathermap.org/data/3.0/onecall"
 DAY_SUMMARY_URL = "https://api.openweathermap.org/data/3.0/onecall/day_summary"
+OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
 # Cities: (name, lat, lon)
 CITIES = [
@@ -91,6 +93,92 @@ def fetch_tomorrow_forecast(lat: float, lon: float, api_key: str) -> dict | None
         return None
     except (ValueError, KeyError) as e:
         log(f"onecall parse error: {e}")
+        return None
+
+
+def fetch_open_meteo_yesterday(lat: float, lon: float, date: str) -> dict | None:
+    """Fallback: fetch yesterday summary from Open-Meteo archive API."""
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": date,
+        "end_date": date,
+        "daily": "temperature_2m_min,temperature_2m_max,precipitation_sum",
+        "timezone": "Europe/Istanbul",
+    }
+    try:
+        r = requests.get(OPEN_METEO_ARCHIVE_URL, params=params, timeout=15)
+        r.raise_for_status()
+        payload = r.json()
+        daily = payload.get("daily", {})
+        if not isinstance(daily, dict):
+            return None
+        tmin = (daily.get("temperature_2m_min") or [None])[0]
+        tmax = (daily.get("temperature_2m_max") or [None])[0]
+        precip = (daily.get("precipitation_sum") or [0])[0]
+        if tmin is None and tmax is None:
+            return None
+        return {
+            "temperature": {"min": tmin, "max": tmax},
+            "precipitation": {"total": precip or 0},
+            "source": "open-meteo",
+        }
+    except (requests.RequestException, ValueError, IndexError) as e:
+        log(f"open-meteo archive error: {e}")
+        return None
+
+
+def fetch_open_meteo_tomorrow(lat: float, lon: float) -> dict | None:
+    """Fallback: fetch tomorrow forecast from Open-Meteo forecast API."""
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "daily": "temperature_2m_min,temperature_2m_max,weathercode,precipitation_sum",
+        "forecast_days": 2,
+        "timezone": "Europe/Istanbul",
+    }
+    weather_map = {
+        0: "açık",
+        1: "çoğunlukla açık",
+        2: "parçalı bulutlu",
+        3: "kapalı",
+        45: "sisli",
+        48: "kırağılı sis",
+        51: "hafif çiseleme",
+        53: "çiseleme",
+        55: "yoğun çiseleme",
+        61: "hafif yağmur",
+        63: "yağmur",
+        65: "kuvvetli yağmur",
+        71: "hafif kar",
+        73: "kar",
+        75: "yoğun kar",
+        80: "sağanak",
+        81: "kuvvetli sağanak",
+        82: "şiddetli sağanak",
+        95: "gök gürültülü sağanak",
+    }
+    try:
+        r = requests.get(OPEN_METEO_FORECAST_URL, params=params, timeout=15)
+        r.raise_for_status()
+        payload = r.json()
+        daily = payload.get("daily", {})
+        if not isinstance(daily, dict):
+            return None
+        tmin = (daily.get("temperature_2m_min") or [None, None])[1]
+        tmax = (daily.get("temperature_2m_max") or [None, None])[1]
+        code = (daily.get("weathercode") or [None, None])[1]
+        precip = (daily.get("precipitation_sum") or [0, 0])[1]
+        if tmin is None and tmax is None:
+            return None
+        return {
+            "temp": {"min": tmin, "max": tmax},
+            "weather": [{"description": weather_map.get(code, "—"), "id": 500 if (precip or 0) > 0 else 800}],
+            "rain": {"1h": precip or 0} if (precip or 0) > 0 else {},
+            "source": "open-meteo",
+        }
+    except (requests.RequestException, ValueError, IndexError) as e:
+        log(f"open-meteo forecast error: {e}")
         return None
 
 
@@ -173,12 +261,18 @@ def build_message(api_key: str, yesterday: str) -> str:
     for name, lat, lon in CITIES:
         lines.append(f"*{name}*")
         yes_data = fetch_yesterday_weather(lat, lon, api_key, yesterday)
+        if not yes_data:
+            log(f"Falling back to Open-Meteo archive for yesterday ({name})")
+            yes_data = fetch_open_meteo_yesterday(lat, lon, yesterday)
         if yes_data:
             lines.append(format_yesterday(yes_data, name))
         else:
             lines.append("  📅 Dün: Veri alınamadı")
 
         tom_data = fetch_tomorrow_forecast(lat, lon, api_key)
+        if not tom_data:
+            log(f"Falling back to Open-Meteo forecast for tomorrow ({name})")
+            tom_data = fetch_open_meteo_tomorrow(lat, lon)
         if tom_data:
             lines.append(format_tomorrow(tom_data, name))
         else:
