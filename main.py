@@ -6,6 +6,7 @@ Sends yesterday's summary and tomorrow's forecast at 20:00 Turkey time.
 import os
 import sys
 from datetime import datetime, timedelta
+from typing import Any
 
 import requests
 from telegram import Bot
@@ -15,6 +16,7 @@ ONECALL_URL = "https://api.openweathermap.org/data/3.0/onecall"
 DAY_SUMMARY_URL = "https://api.openweathermap.org/data/3.0/onecall/day_summary"
 OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+OPENWEATHER_FORECAST_URL = "https://api.openweathermap.org/data/2.5/forecast"
 
 # Cities: (name, lat, lon)
 CITIES = [
@@ -96,47 +98,15 @@ def fetch_tomorrow_forecast(lat: float, lon: float, api_key: str) -> dict | None
         return None
 
 
-def fetch_open_meteo_yesterday(lat: float, lon: float, date: str) -> dict | None:
-    """Fallback: fetch yesterday summary from Open-Meteo archive API."""
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "start_date": date,
-        "end_date": date,
-        "daily": "temperature_2m_min,temperature_2m_max,precipitation_sum",
-        "timezone": "Europe/Istanbul",
-    }
-    try:
-        r = requests.get(OPEN_METEO_ARCHIVE_URL, params=params, timeout=15)
-        r.raise_for_status()
-        payload = r.json()
-        daily = payload.get("daily", {})
-        if not isinstance(daily, dict):
-            return None
-        tmin = (daily.get("temperature_2m_min") or [None])[0]
-        tmax = (daily.get("temperature_2m_max") or [None])[0]
-        precip = (daily.get("precipitation_sum") or [0])[0]
-        if tmin is None and tmax is None:
-            return None
-        return {
-            "temperature": {"min": tmin, "max": tmax},
-            "precipitation": {"total": precip or 0},
-            "source": "open-meteo",
-        }
-    except (requests.RequestException, ValueError, IndexError) as e:
-        log(f"open-meteo archive error: {e}")
+def _safe_get_daily_value(daily: dict[str, Any], key: str, index: int) -> Any:
+    """Return daily[key][index] safely."""
+    values = daily.get(key)
+    if not isinstance(values, list) or len(values) <= index:
         return None
+    return values[index]
 
 
-def fetch_open_meteo_tomorrow(lat: float, lon: float) -> dict | None:
-    """Fallback: fetch tomorrow forecast from Open-Meteo forecast API."""
-    params = {
-        "latitude": lat,
-        "longitude": lon,
-        "daily": "temperature_2m_min,temperature_2m_max,weathercode,precipitation_sum",
-        "forecast_days": 2,
-        "timezone": "Europe/Istanbul",
-    }
+def _map_open_meteo_code(code: Any) -> str:
     weather_map = {
         0: "açık",
         1: "çoğunlukla açık",
@@ -158,6 +128,51 @@ def fetch_open_meteo_tomorrow(lat: float, lon: float) -> dict | None:
         82: "şiddetli sağanak",
         95: "gök gürültülü sağanak",
     }
+    return weather_map.get(code, "—")
+
+
+def fetch_open_meteo_yesterday(lat: float, lon: float, date: str) -> dict | None:
+    """Fallback: fetch yesterday summary from Open-Meteo archive API."""
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": date,
+        "end_date": date,
+        "daily": "temperature_2m_min,temperature_2m_max,precipitation_sum",
+        "timezone": "Europe/Istanbul",
+    }
+    try:
+        r = requests.get(OPEN_METEO_ARCHIVE_URL, params=params, timeout=15)
+        r.raise_for_status()
+        payload = r.json()
+        daily = payload.get("daily", {})
+        if not isinstance(daily, dict):
+            return None
+        tmin = _safe_get_daily_value(daily, "temperature_2m_min", 0)
+        tmax = _safe_get_daily_value(daily, "temperature_2m_max", 0)
+        precip = _safe_get_daily_value(daily, "precipitation_sum", 0) or 0
+        if tmin is None and tmax is None:
+            return None
+        return {
+            "temperature": {"min": tmin, "max": tmax},
+            "precipitation": {"total": precip},
+            "source": "open-meteo-archive",
+        }
+    except (requests.RequestException, ValueError, IndexError) as e:
+        log(f"open-meteo archive error: {e}")
+        return None
+
+
+def fetch_open_meteo_yesterday_from_forecast(lat: float, lon: float) -> dict | None:
+    """Second fallback: get yesterday from Open-Meteo forecast API using past_days."""
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "daily": "temperature_2m_min,temperature_2m_max,precipitation_sum",
+        "past_days": 1,
+        "forecast_days": 1,
+        "timezone": "Europe/Istanbul",
+    }
     try:
         r = requests.get(OPEN_METEO_FORECAST_URL, params=params, timeout=15)
         r.raise_for_status()
@@ -165,20 +180,118 @@ def fetch_open_meteo_tomorrow(lat: float, lon: float) -> dict | None:
         daily = payload.get("daily", {})
         if not isinstance(daily, dict):
             return None
-        tmin = (daily.get("temperature_2m_min") or [None, None])[1]
-        tmax = (daily.get("temperature_2m_max") or [None, None])[1]
-        code = (daily.get("weathercode") or [None, None])[1]
-        precip = (daily.get("precipitation_sum") or [0, 0])[1]
+        tmin = _safe_get_daily_value(daily, "temperature_2m_min", 0)
+        tmax = _safe_get_daily_value(daily, "temperature_2m_max", 0)
+        precip = _safe_get_daily_value(daily, "precipitation_sum", 0) or 0
+        if tmin is None and tmax is None:
+            return None
+        return {
+            "temperature": {"min": tmin, "max": tmax},
+            "precipitation": {"total": precip},
+            "source": "open-meteo-forecast-past",
+        }
+    except (requests.RequestException, ValueError, IndexError) as e:
+        log(f"open-meteo yesterday-from-forecast error: {e}")
+        return None
+
+
+def fetch_open_meteo_tomorrow(lat: float, lon: float) -> dict | None:
+    """Fallback: fetch tomorrow forecast from Open-Meteo forecast API."""
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "daily": "temperature_2m_min,temperature_2m_max,weather_code,precipitation_sum",
+        "forecast_days": 2,
+        "timezone": "Europe/Istanbul",
+    }
+    try:
+        r = requests.get(OPEN_METEO_FORECAST_URL, params=params, timeout=15)
+        r.raise_for_status()
+        payload = r.json()
+        daily = payload.get("daily", {})
+        if not isinstance(daily, dict):
+            return None
+        tmin = _safe_get_daily_value(daily, "temperature_2m_min", 1)
+        tmax = _safe_get_daily_value(daily, "temperature_2m_max", 1)
+        code = _safe_get_daily_value(daily, "weather_code", 1)
+        if code is None:
+            code = _safe_get_daily_value(daily, "weathercode", 1)
+        precip = _safe_get_daily_value(daily, "precipitation_sum", 1) or 0
         if tmin is None and tmax is None:
             return None
         return {
             "temp": {"min": tmin, "max": tmax},
-            "weather": [{"description": weather_map.get(code, "—"), "id": 500 if (precip or 0) > 0 else 800}],
-            "rain": {"1h": precip or 0} if (precip or 0) > 0 else {},
-            "source": "open-meteo",
+            "weather": [{"description": _map_open_meteo_code(code), "id": 500 if precip > 0 else 800}],
+            "rain": {"1h": precip} if precip > 0 else {},
+            "source": "open-meteo-forecast",
         }
     except (requests.RequestException, ValueError, IndexError) as e:
         log(f"open-meteo forecast error: {e}")
+        return None
+
+
+def fetch_openweather_tomorrow_5day(lat: float, lon: float, api_key: str) -> dict | None:
+    """Second fallback: use free OpenWeather 5-day/3-hour endpoint for tomorrow."""
+    params = {
+        "lat": lat,
+        "lon": lon,
+        "appid": api_key,
+        "units": "metric",
+        "lang": "tr",
+    }
+    try:
+        r = requests.get(OPENWEATHER_FORECAST_URL, params=params, timeout=15)
+        r.raise_for_status()
+        payload = r.json()
+        entries = payload.get("list", [])
+        if not isinstance(entries, list) or not entries:
+            return None
+
+        now_tr = datetime.utcnow() + timedelta(hours=3)
+        tomorrow_date = (now_tr + timedelta(days=1)).date()
+        tomorrow_entries = []
+        for item in entries:
+            dt_txt = item.get("dt_txt")
+            if not dt_txt:
+                continue
+            try:
+                dt = datetime.strptime(dt_txt, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+            if dt.date() == tomorrow_date:
+                tomorrow_entries.append(item)
+
+        if not tomorrow_entries:
+            return None
+
+        min_temp = min((entry.get("main", {}).get("temp_min") for entry in tomorrow_entries if isinstance(entry.get("main"), dict)), default=None)
+        max_temp = max((entry.get("main", {}).get("temp_max") for entry in tomorrow_entries if isinstance(entry.get("main"), dict)), default=None)
+        weather_desc = "—"
+        weather_id = 800
+        for entry in tomorrow_entries:
+            weather = entry.get("weather", [])
+            if weather and isinstance(weather, list):
+                weather_desc = weather[0].get("description", "—")
+                weather_id = weather[0].get("id", 800)
+                break
+
+        if min_temp is None and max_temp is None:
+            return None
+
+        rain_total = 0.0
+        for entry in tomorrow_entries:
+            rain = entry.get("rain", {})
+            if isinstance(rain, dict):
+                rain_total += float(rain.get("3h") or 0)
+
+        return {
+            "temp": {"min": min_temp, "max": max_temp},
+            "weather": [{"description": weather_desc, "id": weather_id}],
+            "rain": {"1h": rain_total} if rain_total > 0 else {},
+            "source": "openweather-5day",
+        }
+    except (requests.RequestException, ValueError, TypeError) as e:
+        log(f"openweather 5-day forecast fallback error: {e}")
         return None
 
 
@@ -264,6 +377,9 @@ def build_message(api_key: str, yesterday: str) -> str:
         if not yes_data:
             log(f"Falling back to Open-Meteo archive for yesterday ({name})")
             yes_data = fetch_open_meteo_yesterday(lat, lon, yesterday)
+        if not yes_data:
+            log(f"Falling back to Open-Meteo forecast(past_days) for yesterday ({name})")
+            yes_data = fetch_open_meteo_yesterday_from_forecast(lat, lon)
         if yes_data:
             lines.append(format_yesterday(yes_data, name))
         else:
@@ -273,6 +389,9 @@ def build_message(api_key: str, yesterday: str) -> str:
         if not tom_data:
             log(f"Falling back to Open-Meteo forecast for tomorrow ({name})")
             tom_data = fetch_open_meteo_tomorrow(lat, lon)
+        if not tom_data:
+            log(f"Falling back to OpenWeather 5-day forecast for tomorrow ({name})")
+            tom_data = fetch_openweather_tomorrow_5day(lat, lon, api_key)
         if tom_data:
             lines.append(format_tomorrow(tom_data, name))
         else:
