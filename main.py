@@ -26,6 +26,20 @@ CITIES = [
 
 # Turkey timezone offset (UTC+3)
 TZ_TURKEY = "+03:00"
+MONTHS_TR = [
+    "Ocak",
+    "Şubat",
+    "Mart",
+    "Nisan",
+    "Mayıs",
+    "Haziran",
+    "Temmuz",
+    "Ağustos",
+    "Eylül",
+    "Ekim",
+    "Kasım",
+    "Aralık",
+]
 
 
 def log(msg: str) -> None:
@@ -38,6 +52,11 @@ def get_yesterday_date_turkey() -> str:
     now = datetime.utcnow() + timedelta(hours=3)
     yesterday = now - timedelta(days=1)
     return yesterday.strftime("%Y-%m-%d")
+
+
+def now_turkey() -> datetime:
+    """Return current datetime in Turkey timezone (UTC+3)."""
+    return datetime.utcnow() + timedelta(hours=3)
 
 
 def fetch_yesterday_weather(lat: float, lon: float, api_key: str, date: str) -> dict | None:
@@ -96,6 +115,37 @@ def fetch_tomorrow_forecast(lat: float, lon: float, api_key: str) -> dict | None
     except (ValueError, KeyError) as e:
         log(f"onecall parse error: {e}")
         return None
+
+
+def fetch_today_tomorrow_forecast(lat: float, lon: float, api_key: str) -> tuple[dict | None, dict | None]:
+    """Fetch both today's and tomorrow's daily forecast via onecall."""
+    params = {
+        "lat": lat,
+        "lon": lon,
+        "exclude": "minutely,hourly",
+        "units": "metric",
+        "lang": "tr",
+        "appid": api_key,
+    }
+    try:
+        r = requests.get(ONECALL_URL, params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        daily = data.get("daily", [])
+        if len(daily) < 2:
+            log("onecall: insufficient daily forecast for today/tomorrow")
+            return None, None
+        return daily[0], daily[1]
+    except requests.HTTPError as e:
+        body = (e.response.text or "")[:300] if e.response is not None else ""
+        log(f"onecall(today/tomorrow) HTTP error: {e}; response={body}")
+        return None, None
+    except requests.RequestException as e:
+        log(f"onecall(today/tomorrow) API error: {e}")
+        return None, None
+    except (ValueError, KeyError) as e:
+        log(f"onecall(today/tomorrow) parse error: {e}")
+        return None, None
 
 
 def _safe_get_daily_value(daily: dict[str, Any], key: str, index: int) -> Any:
@@ -312,6 +362,85 @@ def has_rain(data: dict, is_day_summary: bool) -> bool:
     return False
 
 
+def _weather_emoji(weather_id: int, has_precipitation: bool) -> str:
+    if has_precipitation or 500 <= weather_id < 700:
+        return "🌧"
+    if 200 <= weather_id < 300:
+        return "⛈"
+    if 800 == weather_id:
+        return "🌤"
+    if weather_id in (801, 802):
+        return "🌥"
+    if weather_id in (803, 804):
+        return "☁"
+    return "🌤"
+
+
+def _format_temp_range(data: dict, key: str) -> tuple[str, str]:
+    temp = data.get(key, {})
+    if not isinstance(temp, dict):
+        temp = {}
+    tmin = temp.get("min")
+    tmax = temp.get("max")
+    tmin_str = f"{round(float(tmin))}°" if tmin is not None else "?°"
+    tmax_str = f"{round(float(tmax))}°" if tmax is not None else "?°"
+    return tmin_str, tmax_str
+
+
+def _capitalize_tr(text: str) -> str:
+    if not text:
+        return "—"
+    return text[0].upper() + text[1:]
+
+
+def format_yesterday_line(data: dict) -> str:
+    tmin, tmax = _format_temp_range(data, "temperature")
+    is_rainy = has_rain(data, True)
+    desc = "Hafif yağmur" if is_rainy else "Parçalı bulutlu"
+    emoji = "🌧" if is_rainy else "🌥"
+    return f"Dün: {tmin}–{tmax} {emoji} {desc}"
+
+
+def format_daily_line(label: str, data: dict) -> str:
+    tmin, tmax = _format_temp_range(data, "temp")
+    weather = data.get("weather", [{}])
+    first = weather[0] if weather else {}
+    desc = _capitalize_tr(first.get("description", "—"))
+    wid = int(first.get("id", 800) or 800)
+    is_rainy = has_rain(data, False)
+    emoji = _weather_emoji(wid, is_rainy)
+    return f"{label}: {tmin}–{tmax} {emoji} {desc}"
+
+
+def format_warning(today: dict, tomorrow: dict) -> str | None:
+    today_temp = today.get("temp", {}) if isinstance(today.get("temp", {}), dict) else {}
+    tomorrow_temp = tomorrow.get("temp", {}) if isinstance(tomorrow.get("temp", {}), dict) else {}
+    today_max = today_temp.get("max")
+    tomorrow_max = tomorrow_temp.get("max")
+    if today_max is None or tomorrow_max is None:
+        return None
+
+    diff = round(float(today_max) - float(tomorrow_max))
+    if diff <= 0:
+        return None
+
+    rainy_tomorrow = has_rain(tomorrow, False)
+    pop = tomorrow.get("pop")
+    pop_text = f" (%{round(float(pop) * 100)})" if pop is not None else ""
+    note = "şemsiyeni almayı unutma ☔" if rainy_tomorrow else "biraz kalın giyin 💕"
+    return f"⚠ Yarın {diff}° daha soğuk, {note}{pop_text}"
+
+
+def format_report_header() -> list[str]:
+    now = now_turkey()
+    month_name = MONTHS_TR[now.month - 1]
+    return [
+        f"🕒 {now.day} {month_name} {now.year} – {now.strftime('%H:%M')}",
+        "🌤 Nur’cuğum için Hava Durumu 💛",
+        "",
+    ]
+
+
 def format_yesterday(data: dict, city: str) -> str:
     """Format yesterday's weather from day_summary response."""
     temp = data.get("temperature", {})
@@ -365,14 +494,10 @@ def format_tomorrow(data: dict, city: str) -> str:
 
 def build_message(api_key: str, yesterday: str) -> str:
     """Build the full Telegram message for all cities."""
-    lines = [
-        "🌤️ *Hava Durumu Özeti*",
-        f"_Tarih: {yesterday} (dün) / yarın_",
-        "",
-    ]
+    lines = format_report_header()
 
     for name, lat, lon in CITIES:
-        lines.append(f"*{name}*")
+        lines.append(f"📍 {name}")
         yes_data = fetch_yesterday_weather(lat, lon, api_key, yesterday)
         if not yes_data:
             log(f"Falling back to Open-Meteo archive for yesterday ({name})")
@@ -381,11 +506,16 @@ def build_message(api_key: str, yesterday: str) -> str:
             log(f"Falling back to Open-Meteo forecast(past_days) for yesterday ({name})")
             yes_data = fetch_open_meteo_yesterday_from_forecast(lat, lon)
         if yes_data:
-            lines.append(format_yesterday(yes_data, name))
+            lines.append(format_yesterday_line(yes_data))
         else:
-            lines.append("  📅 Dün: Veri alınamadı")
+            lines.append("Dün: Veri alınamadı")
 
-        tom_data = fetch_tomorrow_forecast(lat, lon, api_key)
+        today_data, tom_data = fetch_today_tomorrow_forecast(lat, lon, api_key)
+        if today_data:
+            lines.append(format_daily_line("Bugün", today_data))
+        else:
+            lines.append("Bugün: Veri alınamadı")
+
         if not tom_data:
             log(f"Falling back to Open-Meteo forecast for tomorrow ({name})")
             tom_data = fetch_open_meteo_tomorrow(lat, lon)
@@ -393,11 +523,16 @@ def build_message(api_key: str, yesterday: str) -> str:
             log(f"Falling back to OpenWeather 5-day forecast for tomorrow ({name})")
             tom_data = fetch_openweather_tomorrow_5day(lat, lon, api_key)
         if tom_data:
-            lines.append(format_tomorrow(tom_data, name))
+            lines.append(format_daily_line("Yarın", tom_data))
+            if today_data:
+                warning = format_warning(today_data, tom_data)
+                if warning:
+                    lines.append(warning)
         else:
-            lines.append("  📆 Yarın: Veri alınamadı")
+            lines.append("Yarın: Veri alınamadı")
         lines.append("")
 
+    lines.append("✨ Dikkatli git gel güzelim 💛")
     return "\n".join(lines).strip()
 
 
@@ -408,7 +543,6 @@ def send_telegram(token: str, chat_id: str, text: str) -> bool:
         bot.send_message(
             chat_id=chat_id,
             text=text,
-            parse_mode="Markdown",
         )
         log("Telegram message sent successfully")
         return True
