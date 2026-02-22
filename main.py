@@ -5,6 +5,7 @@ Sends yesterday's summary and tomorrow's forecast at 20:00 Turkey time.
 
 import os
 import sys
+import json
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -40,10 +41,78 @@ MONTHS_TR = [
     "Kasım",
     "Aralık",
 ]
+SUBSCRIBERS_FILE = "subscribers.json"
 
 
 def log(msg: str) -> None:
     print(msg, flush=True)
+
+
+def load_subscribers() -> list[int]:
+    """Load subscribers from subscribers.json, creating the file when missing."""
+    if not os.path.exists(SUBSCRIBERS_FILE):
+        save_subscribers([])
+        return []
+
+    try:
+        with open(SUBSCRIBERS_FILE, "r", encoding="utf-8") as file:
+            payload = json.load(file)
+        subscribers = payload.get("subscribers", []) if isinstance(payload, dict) else []
+        if not isinstance(subscribers, list):
+            log("Invalid subscribers file format; resetting file")
+            save_subscribers([])
+            return []
+        return [int(chat_id) for chat_id in subscribers]
+    except (OSError, ValueError, TypeError) as exc:
+        log(f"Failed to load subscribers: {exc}")
+        save_subscribers([])
+        return []
+
+
+def save_subscribers(subscribers: list[int]) -> None:
+    """Persist subscriber chat IDs into subscribers.json."""
+    unique_subscribers = sorted(set(int(chat_id) for chat_id in subscribers))
+    payload = {"subscribers": unique_subscribers}
+    try:
+        with open(SUBSCRIBERS_FILE, "w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2)
+    except OSError as exc:
+        log(f"Failed to save subscribers: {exc}")
+
+
+def add_subscriber(chat_id: int) -> bool:
+    """Add a chat ID into subscribers.json if it does not already exist."""
+    subscribers = load_subscribers()
+    normalized_chat_id = int(chat_id)
+    if normalized_chat_id in subscribers:
+        return False
+
+    subscribers.append(normalized_chat_id)
+    save_subscribers(subscribers)
+    return True
+
+
+def register_start_subscribers(token: str) -> None:
+    """Read Telegram updates and register users that sent /start."""
+    bot = Bot(token=token)
+    try:
+        updates = bot.get_updates(timeout=10)
+    except Exception as exc:
+        log(f"Failed to fetch updates for /start handling: {exc}")
+        return
+
+    for update in updates:
+        message = getattr(update, "message", None)
+        if not message or not message.text:
+            continue
+
+        if not message.text.strip().startswith("/start"):
+            continue
+
+        if add_subscriber(message.chat_id):
+            log(f"Added new subscriber: {message.chat_id}")
+        else:
+            log(f"Subscriber already exists: {message.chat_id}")
 
 
 def get_yesterday_date_turkey() -> str:
@@ -574,19 +643,28 @@ def build_message(api_key: str, yesterday: str) -> str:
     return "\n".join(lines).strip()
 
 
-def send_telegram(token: str, chat_id: str, text: str) -> bool:
-    """Send message via Telegram Bot API."""
-    try:
-        bot = Bot(token=token)
-        bot.send_message(
-            chat_id=chat_id,
-            text=text,
-        )
-        log("Telegram message sent successfully")
-        return True
-    except Exception as e:
-        log(f"Telegram send error: {e}")
+def broadcast_message(message: str) -> bool:
+    """Send a weather message to all registered subscribers."""
+    token = os.environ.get("BOT_TOKEN")
+    if not token:
+        log("Missing env: BOT_TOKEN")
         return False
+
+    subscribers = load_subscribers()
+    if not subscribers:
+        log("No subscribers found; skipping broadcast")
+        return False
+
+    bot = Bot(token=token)
+    all_sent = True
+    for chat_id in subscribers:
+        try:
+            bot.send_message(chat_id=chat_id, text=message)
+            log(f"Telegram message sent successfully to {chat_id}")
+        except Exception as exc:
+            all_sent = False
+            log(f"Telegram send error for {chat_id}: {exc}")
+    return all_sent
 
 
 def main() -> None:
@@ -596,9 +674,14 @@ def main() -> None:
     token = os.environ.get("BOT_TOKEN")
     chat_id = os.environ.get("CHAT_ID")
 
-    if not all((api_key, token, chat_id)):
-        log("Missing env: WEATHER_API_KEY, BOT_TOKEN, CHAT_ID")
+    if not all((api_key, token)):
+        log("Missing env: WEATHER_API_KEY, BOT_TOKEN")
         sys.exit(1)
+
+    register_start_subscribers(token)
+
+    if chat_id:
+        add_subscriber(int(chat_id))
 
     yesterday = get_yesterday_date_turkey()
     log(f"Fetching weather for yesterday={yesterday} and tomorrow")
@@ -608,7 +691,7 @@ def main() -> None:
         log("Message empty, aborting")
         sys.exit(1)
 
-    if not send_telegram(token, chat_id, msg):
+    if not broadcast_message(msg):
         sys.exit(1)
 
     log("Weather bot finished successfully")
