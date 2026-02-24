@@ -252,6 +252,34 @@ def _map_open_meteo_code(code: Any) -> str:
     return weather_map.get(code, "—")
 
 
+def _open_meteo_to_openweather_id(code: Any) -> int:
+    """Map Open-Meteo weather_code to the closest OpenWeather weather id."""
+    try:
+        normalized = int(code)
+    except (TypeError, ValueError):
+        return 800
+
+    if normalized in (0, 1):
+        return 800
+    if normalized == 2:
+        return 801
+    if normalized == 3:
+        return 804
+    if normalized in (45, 48):
+        return 741
+    if normalized in (51, 53, 55, 56, 57):
+        return 300
+    if normalized in (61, 63, 65, 80, 81, 82):
+        return 500
+    if normalized in (66, 67):
+        return 511
+    if normalized in (71, 73, 75, 77, 85, 86):
+        return 600
+    if normalized in (95, 96, 99):
+        return 200
+    return 800
+
+
 def fetch_open_meteo_yesterday(lat: float, lon: float, date: str) -> dict | None:
     """Fallback: fetch yesterday summary from Open-Meteo archive API."""
     params = {
@@ -342,7 +370,7 @@ def fetch_open_meteo_tomorrow(lat: float, lon: float) -> dict | None:
             return None
         return {
             "temp": {"min": tmin, "max": tmax},
-            "weather": [{"description": _map_open_meteo_code(code), "id": 500 if precip > 0 else 800}],
+            "weather": [{"description": _map_open_meteo_code(code), "id": _open_meteo_to_openweather_id(code)}],
             "rain": {"1h": precip} if precip > 0 else {},
             "source": "open-meteo-forecast",
         }
@@ -377,7 +405,7 @@ def fetch_open_meteo_today(lat: float, lon: float) -> dict | None:
             return None
         return {
             "temp": {"min": tmin, "max": tmax},
-            "weather": [{"description": _map_open_meteo_code(code), "id": 500 if precip > 0 else 800}],
+            "weather": [{"description": _map_open_meteo_code(code), "id": _open_meteo_to_openweather_id(code)}],
             "rain": {"1h": precip} if precip > 0 else {},
             "source": "open-meteo-forecast-today",
         }
