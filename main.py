@@ -43,6 +43,7 @@ MONTHS_TR = [
 ]
 SUBSCRIBERS_FILE = "subscribers.json"
 RAIN_THRESHOLD_MM = 1.0
+HEAVY_RAIN_THRESHOLD_MM = 3.0
 POP_RAIN_THRESHOLD = 0.60
 
 
@@ -502,24 +503,30 @@ def has_rain(data: dict, is_day_summary: bool) -> bool:
     if "precipitation" in data and isinstance(data["precipitation"], dict):
         rain_total += _to_float(data["precipitation"].get("total"))
 
-    if rain_total >= RAIN_THRESHOLD_MM:
+    pop = _to_float(data.get("pop"))
+    if rain_total >= HEAVY_RAIN_THRESHOLD_MM:
+        return True
+    if rain_total >= RAIN_THRESHOLD_MM and pop >= POP_RAIN_THRESHOLD:
         return True
 
     weather = data.get("weather", [{}])
     if weather:
         main = weather[0].get("main", "").lower()
         wid = int(weather[0].get("id", 0) or 0)
-        pop = _to_float(data.get("pop"))
         if (main in ("rain", "drizzle") or 500 <= wid < 600) and pop >= POP_RAIN_THRESHOLD:
             return True
     return False
 
 
 def _weather_emoji(weather_id: int, has_precipitation: bool) -> str:
-    if has_precipitation or 500 <= weather_id < 700:
+    if has_precipitation:
         return "🌧"
     if 200 <= weather_id < 300:
         return "⛈"
+    if 500 <= weather_id < 600:
+        return "🌥"
+    if 600 <= weather_id < 700:
+        return "❄"
     if 800 == weather_id:
         return "🌤"
     if weather_id in (801, 802):
