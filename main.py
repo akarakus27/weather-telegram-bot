@@ -42,6 +42,8 @@ MONTHS_TR = [
     "Aralık",
 ]
 SUBSCRIBERS_FILE = "subscribers.json"
+RAIN_THRESHOLD_MM = 1.0
+POP_RAIN_THRESHOLD = 0.60
 
 
 def log(msg: str) -> None:
@@ -450,18 +452,37 @@ def fetch_openweather_tomorrow_5day(lat: float, lon: float, api_key: str) -> dic
 
 
 def has_rain(data: dict, is_day_summary: bool) -> bool:
+    def _to_float(value: Any) -> float:
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
     if is_day_summary:
         prec = data.get("precipitation", {})
         total = prec.get("total", 0) if isinstance(prec, dict) else 0
-        return float(total or 0) > 0
-    # hourly-style: rain.1h or weather main/id
-    if "rain" in data and data["rain"]:
+        return _to_float(total) >= RAIN_THRESHOLD_MM
+
+    rain_total = 0.0
+    rain_data = data.get("rain")
+    if isinstance(rain_data, dict):
+        rain_total += _to_float(rain_data.get("1h"))
+        rain_total += _to_float(rain_data.get("3h"))
+    else:
+        rain_total += _to_float(rain_data)
+
+    if "precipitation" in data and isinstance(data["precipitation"], dict):
+        rain_total += _to_float(data["precipitation"].get("total"))
+
+    if rain_total >= RAIN_THRESHOLD_MM:
         return True
+
     weather = data.get("weather", [{}])
     if weather:
         main = weather[0].get("main", "").lower()
-        wid = weather[0].get("id", 0)
-        if main in ("rain", "drizzle") or 500 <= wid < 600:
+        wid = int(weather[0].get("id", 0) or 0)
+        pop = _to_float(data.get("pop"))
+        if (main in ("rain", "drizzle") or 500 <= wid < 600) and pop >= POP_RAIN_THRESHOLD:
             return True
     return False
 
@@ -497,23 +518,41 @@ def _capitalize_tr(text: str) -> str:
     return text[0].upper() + text[1:]
 
 
-def format_yesterday_line(data: dict) -> str:
+def _format_relative_date(days_delta: int) -> str:
+    date_value = (now_turkey() + timedelta(days=days_delta)).date()
+    month_name = MONTHS_TR[date_value.month - 1]
+    return f"{date_value.day} {month_name}"
+
+
+def _fallback_desc_from_weather_id(weather_id: int) -> str:
+    if weather_id == 800:
+        return "Açık"
+    if weather_id in (801, 802):
+        return "Parçalı bulutlu"
+    if weather_id in (803, 804):
+        return "Bulutlu"
+    return "Parçalı bulutlu"
+
+
+def format_yesterday_line(data: dict, day_text: str) -> str:
     tmin, tmax = _format_temp_range(data, "temperature")
     is_rainy = has_rain(data, True)
     desc = "Hafif yağmur" if is_rainy else "Parçalı bulutlu"
     emoji = "🌧" if is_rainy else "🌥"
-    return f"Dün: {tmin}–{tmax} {emoji} {desc}"
+    return f"Dün ({day_text}): {tmin}–{tmax} {emoji} {desc}"
 
 
-def format_daily_line(label: str, data: dict) -> str:
+def format_daily_line(label: str, day_text: str, data: dict) -> str:
     tmin, tmax = _format_temp_range(data, "temp")
     weather = data.get("weather", [{}])
     first = weather[0] if weather else {}
     desc = _capitalize_tr(first.get("description", "—"))
     wid = int(first.get("id", 800) or 800)
     is_rainy = has_rain(data, False)
+    if not is_rainy and any(word in desc.lower() for word in ("yağmur", "sağanak", "çisele")):
+        desc = _fallback_desc_from_weather_id(wid)
     emoji = _weather_emoji(wid, is_rainy)
-    return f"{label}: {tmin}–{tmax} {emoji} {desc}"
+    return f"{label} ({day_text}): {tmin}–{tmax} {emoji} {desc}"
 
 
 def format_warning(today: dict, tomorrow: dict) -> str | None:
@@ -600,6 +639,10 @@ def build_message(api_key: str, yesterday: str) -> str:
     """Build the full Telegram message for all cities."""
     lines = format_report_header()
 
+    yesterday_text = _format_relative_date(-1)
+    today_text = _format_relative_date(0)
+    tomorrow_text = _format_relative_date(1)
+
     for name, lat, lon in CITIES:
         lines.append(f"📍 {name}")
         yes_data = fetch_yesterday_weather(lat, lon, api_key, yesterday)
@@ -610,18 +653,18 @@ def build_message(api_key: str, yesterday: str) -> str:
             log(f"Falling back to Open-Meteo forecast(past_days) for yesterday ({name})")
             yes_data = fetch_open_meteo_yesterday_from_forecast(lat, lon)
         if yes_data:
-            lines.append(format_yesterday_line(yes_data))
+            lines.append(format_yesterday_line(yes_data, yesterday_text))
         else:
-            lines.append("Dün: Veri alınamadı")
+            lines.append(f"Dün ({yesterday_text}): Veri alınamadı")
 
         today_data, tom_data = fetch_today_tomorrow_forecast(lat, lon, api_key)
         if not today_data:
             log(f"Falling back to Open-Meteo forecast for today ({name})")
             today_data = fetch_open_meteo_today(lat, lon)
         if today_data:
-            lines.append(format_daily_line("Bugün", today_data))
+            lines.append(format_daily_line("Bugün", today_text, today_data))
         else:
-            lines.append("Bugün: Veri alınamadı")
+            lines.append(f"Bugün ({today_text}): Veri alınamadı")
 
         if not tom_data:
             log(f"Falling back to Open-Meteo forecast for tomorrow ({name})")
@@ -630,13 +673,13 @@ def build_message(api_key: str, yesterday: str) -> str:
             log(f"Falling back to OpenWeather 5-day forecast for tomorrow ({name})")
             tom_data = fetch_openweather_tomorrow_5day(lat, lon, api_key)
         if tom_data:
-            lines.append(format_daily_line("Yarın", tom_data))
+            lines.append(format_daily_line("Yarın", tomorrow_text, tom_data))
             if today_data:
                 warning = format_warning(today_data, tom_data)
                 if warning:
                     lines.append(warning)
         else:
-            lines.append("Yarın: Veri alınamadı")
+            lines.append(f"Yarın ({tomorrow_text}): Veri alınamadı")
         lines.append("")
 
     lines.append("✨ Dikkatli git gel güzelim 💛❤️")
