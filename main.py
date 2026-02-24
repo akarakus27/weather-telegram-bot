@@ -43,6 +43,7 @@ MONTHS_TR = [
 ]
 SUBSCRIBERS_FILE = "subscribers.json"
 RAIN_THRESHOLD_MM = 1.0
+HEAVY_RAIN_THRESHOLD_MM = 3.0
 POP_RAIN_THRESHOLD = 0.60
 
 
@@ -252,6 +253,34 @@ def _map_open_meteo_code(code: Any) -> str:
     return weather_map.get(code, "—")
 
 
+def _open_meteo_to_openweather_id(code: Any) -> int:
+    """Map Open-Meteo weather_code to the closest OpenWeather weather id."""
+    try:
+        normalized = int(code)
+    except (TypeError, ValueError):
+        return 800
+
+    if normalized in (0, 1):
+        return 800
+    if normalized == 2:
+        return 801
+    if normalized == 3:
+        return 804
+    if normalized in (45, 48):
+        return 741
+    if normalized in (51, 53, 55, 56, 57):
+        return 300
+    if normalized in (61, 63, 65, 80, 81, 82):
+        return 500
+    if normalized in (66, 67):
+        return 511
+    if normalized in (71, 73, 75, 77, 85, 86):
+        return 600
+    if normalized in (95, 96, 99):
+        return 200
+    return 800
+
+
 def fetch_open_meteo_yesterday(lat: float, lon: float, date: str) -> dict | None:
     """Fallback: fetch yesterday summary from Open-Meteo archive API."""
     params = {
@@ -342,7 +371,7 @@ def fetch_open_meteo_tomorrow(lat: float, lon: float) -> dict | None:
             return None
         return {
             "temp": {"min": tmin, "max": tmax},
-            "weather": [{"description": _map_open_meteo_code(code), "id": 500 if precip > 0 else 800}],
+            "weather": [{"description": _map_open_meteo_code(code), "id": _open_meteo_to_openweather_id(code)}],
             "rain": {"1h": precip} if precip > 0 else {},
             "source": "open-meteo-forecast",
         }
@@ -377,7 +406,7 @@ def fetch_open_meteo_today(lat: float, lon: float) -> dict | None:
             return None
         return {
             "temp": {"min": tmin, "max": tmax},
-            "weather": [{"description": _map_open_meteo_code(code), "id": 500 if precip > 0 else 800}],
+            "weather": [{"description": _map_open_meteo_code(code), "id": _open_meteo_to_openweather_id(code)}],
             "rain": {"1h": precip} if precip > 0 else {},
             "source": "open-meteo-forecast-today",
         }
@@ -474,24 +503,30 @@ def has_rain(data: dict, is_day_summary: bool) -> bool:
     if "precipitation" in data and isinstance(data["precipitation"], dict):
         rain_total += _to_float(data["precipitation"].get("total"))
 
-    if rain_total >= RAIN_THRESHOLD_MM:
+    pop = _to_float(data.get("pop"))
+    if rain_total >= HEAVY_RAIN_THRESHOLD_MM:
+        return True
+    if rain_total >= RAIN_THRESHOLD_MM and pop >= POP_RAIN_THRESHOLD:
         return True
 
     weather = data.get("weather", [{}])
     if weather:
         main = weather[0].get("main", "").lower()
         wid = int(weather[0].get("id", 0) or 0)
-        pop = _to_float(data.get("pop"))
         if (main in ("rain", "drizzle") or 500 <= wid < 600) and pop >= POP_RAIN_THRESHOLD:
             return True
     return False
 
 
 def _weather_emoji(weather_id: int, has_precipitation: bool) -> str:
-    if has_precipitation or 500 <= weather_id < 700:
+    if has_precipitation:
         return "🌧"
     if 200 <= weather_id < 300:
         return "⛈"
+    if 500 <= weather_id < 600:
+        return "🌥"
+    if 600 <= weather_id < 700:
+        return "❄"
     if 800 == weather_id:
         return "🌤"
     if weather_id in (801, 802):
