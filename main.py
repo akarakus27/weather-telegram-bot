@@ -540,7 +540,7 @@ def format_report_header() -> list[str]:
     month_name = MONTHS_TR[now.month - 1]
     return [
         f"🕒 {now.day} {month_name} {now.year} – {now.strftime('%H:%M')}",
-        "🌤 Nur’cuğum için Hava Durumu 💛",
+        "🌤 Nur’cuğum için Hava Durumu 💛❤️",
         "",
     ]
 
@@ -639,7 +639,7 @@ def build_message(api_key: str, yesterday: str) -> str:
             lines.append("Yarın: Veri alınamadı")
         lines.append("")
 
-    lines.append("✨ Dikkatli git gel güzelim 💛")
+    lines.append("✨ Dikkatli git gel güzelim 💛❤️")
     return "\n".join(lines).strip()
 
 
